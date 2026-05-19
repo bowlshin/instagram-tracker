@@ -19,3 +19,4 @@ jobs:
           INSTAGRAM_TOKEN: ${{ secrets.INSTAGRAM_TOKEN }}
           NOTION_DB_ID: ${{ secrets.NOTION_DB_ID }}
           IG_ACCOUNT_ID: ${{ secrets.IG_ACCOUNT_ID }}
+          INSTAGRAM_ACCOUNT_ID: ${{ secrets.INSTAGRAM_ACCOUNT_ID }}
