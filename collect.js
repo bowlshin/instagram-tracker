@@ -281,7 +281,7 @@ async function updateExistingTracking() {
 async function main() {
   console.log('=== Instagram-Notion Sync Start ===');
   
-  if (!CONFIG.NOTION_TOKEN || !CONFIG.NOTION_DB_ID || !CONFIG.INSTAGRAM_TOKEN) {
+  if (!CONFIG.NOTION_TOKEN || !CONFIG.NOTION_DB_ID || !CONFIG.INSTAGRAM_TOKEN || !CONFIG.INSTAGRAM_ACCOUNT_ID) {
     console.error('필수 환경 변수가 누락되었습니다.');
     process.exit(1);
   }
