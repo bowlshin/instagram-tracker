@@ -192,10 +192,9 @@ async function getMediaInsights(mediaId, mediaType) {
   if (!isCarousel) {
     metrics += ',views';
   }
-  if (!isCarousel) {
-    metrics += ',follows,profile_visits';
-  }
+  // follows, profile_visits 는 REEL/VIDEO 타입에서만 지원됨 (FEED, CAROUSEL_ALBUM 미지원)
   if (isReel) {
+    metrics += ',follows,profile_visits';
     metrics += ',ig_reels_avg_watch_time,ig_reels_video_view_total_time';
   }
 
@@ -279,23 +278,27 @@ async function getRecentMedia(limit = 50) {
 
 /**
  * 인사이트 데이터를 Notion 속성 형식으로 변환
- * (존재하는 속성만 포함하여 validation_error 방지)
+ * 릴스 전용 속성(팔로우, 프로필 방문, 평균/총 시청 시간)은 isReel=true일 때만 포함
  */
-function buildInsightProperties(insights, likeCount = 0, commentCount = 0) {
-  return {
-    '조회수':          { number: insights.views          || 0 },
-    '좋아요':          { number: likeCount               || 0 },
-    '댓글':            { number: commentCount            || 0 },
-    '저장':            { number: insights.saved          || 0 },
-    '도달':            { number: insights.reach          || 0 },
-    '공유':            { number: insights.shares         || 0 },
-    '팔로우':          { number: insights.follows        || 0 },
-    '프로필 방문':     { number: insights.profileVisits  || 0 },
-    '총 반응 수':      { number: insights.totalInteractions || 0 },
-    '평균 시청 시간(초)':  { number: insights.avgWatchTimeSec  || 0 },
-    '총 시청 시간(분)':    { number: insights.totalWatchTimeMin || 0 },
-    '마지막 수집일':   { date: { start: new Date().toISOString() } },
+function buildInsightProperties(insights, likeCount = 0, commentCount = 0, isReel = false) {
+  const base = {
+    '조회수':     { number: insights.views  || 0 },
+    '좋아요':     { number: likeCount       || 0 },
+    '댓글':       { number: commentCount   || 0 },
+    '저장':       { number: insights.saved  || 0 },
+    '도달':       { number: insights.reach  || 0 },
+    '공유':       { number: insights.shares || 0 },
+    '총 반응 수': { number: insights.totalInteractions || 0 },
+    '마지막 수집일': { date: { start: new Date().toISOString() } },
   };
+  // 릴스 전용 속성: 해당 타입일 때만 포함 (포함하지 않으면 validation_error 발생)
+  if (isReel) {
+    base['팔로우']            = { number: insights.follows       || 0 };
+    base['프로필 방문']        = { number: insights.profileVisits || 0 };
+    base['평균 시청 시간(초)'] = { number: insights.avgWatchTimeSec  || 0 };
+    base['총 시청 시간(분)']   = { number: insights.totalWatchTimeMin || 0 };
+  }
+  return base;
 }
 
 /**
@@ -345,27 +348,25 @@ async function processNewPosts() {
       console.log(`[Step 1] 인사이트 수집 실패 (${media.id}): ${insights.insightError}`);
     }
 
-    const isVideo = media.media_type === 'VIDEO' || media.media_type === 'REEL';
-    const channel = isVideo ? '릴스' : '피드/캐러셀';
-
+    const isReel = media.media_type === 'VIDEO' || media.media_type === 'REEL';
     const properties = {
       '이름': {
-        title: [{ type: 'text', text: { content: (media.caption || '(캡션 없음)').slice(0, 50) } }]
+        title: [{ type: 'text', text: { content: (media.caption || '(캐션 없음)').slice(0, 50) } }]
       },
       'Instagram ID': {
         rich_text: [{ type: 'text', text: { content: media.id } }]
       },
       '원본 URL': { url: media.permalink },
       '날짜':     { date: { start: media.timestamp } },
-      '채널':     { select: { name: channel } },
+      '채널':     { select: { name: isReel ? '릴스' : '피드/캐러셀' } },
       '트래킹 상태': { select: { name: '트래킹중' } },
-      ...buildInsightProperties(insights, media.like_count, media.comments_count),
+      ...buildInsightProperties(insights, media.like_count, media.comments_count, isReel),
     };
 
     const result = await createPage(properties);
     if (result.success) {
       if (media.caption) await appendCaptionBlock(result.id, media.caption);
-      console.log(`[Step 1] 신규 등록 완료: ${media.id} (${channel})`);
+      console.log(`[Step 1] 신규 등록 완료: ${media.id} (${isReel ? '릴스' : '피드/캐러셀'})`);
       newCount++;
     } else {
       console.log(`[Step 1] 신규 등록 실패: ${media.id}`);
@@ -422,10 +423,12 @@ async function updateExistingTracking() {
       console.log(`[Step 2] 인사이트 수집 실패 (${instagramId}): ${insights.insightError}`);
     }
 
+    const isReel = mediaInfo.media_type === 'VIDEO' || mediaInfo.media_type === 'REEL';
     const updateResult = await updatePage(page.id, buildInsightProperties(
       insights,
       mediaInfo.like_count,
-      mediaInfo.comments_count
+      mediaInfo.comments_count,
+      isReel
     ));
 
     if (updateResult.isInvalidPage) {
