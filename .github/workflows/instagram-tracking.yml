@@ -13,7 +13,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
-      - run: node collect.js
+      - run: node collect_auto.js
         env:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           INSTAGRAM_TOKEN: ${{ secrets.INSTAGRAM_TOKEN }}
