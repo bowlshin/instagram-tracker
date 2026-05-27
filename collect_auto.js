@@ -4,6 +4,12 @@
  * 변경 사항:
  *   - 기존: 노션에 URL을 수동 입력해야 수집 가능
  *   - 개선: 인스타그램 API에서 게시물을 자동으로 가져와 노션 DB에 없으면 자동 생성
+ *   - v22.0+ API 호환: plays/impressions → views 교체
+ *
+ * Notion DB 속성 매핑:
+ *   이름, Instagram ID, 원본 URL, 날짜, 채널, 트래킹 상태,
+ *   조회수, 좋아요, 댓글, 저장, 도달, 공유, 팔로우, 프로필 방문,
+ *   총 시청 시간(분), 평균 시청 시간(초), 총 반응 수, 마지막 수집일
  *
  * 필수 환경 변수:
  *   - NOTION_TOKEN: 노션 내부 통합 토큰
@@ -98,7 +104,8 @@ async function queryDatabase(filter) {
   let allResults = [];
   let startCursor = undefined;
   while (true) {
-    const body = { filter };
+    const body = {};
+    if (filter) body.filter = filter;
     if (startCursor) body.start_cursor = startCursor;
     const data = await notionRequest(`databases/${CONFIG.NOTION_DB_ID}/query`, 'POST', body);
     if (data.object === 'error') return allResults;
@@ -109,7 +116,7 @@ async function queryDatabase(filter) {
   return allResults;
 }
 
-/* 노션 페이지 업데이트 */
+/* 노션 페이지 업데이트 (존재하는 속성만 안전하게 업데이트) */
 async function updatePage(pageId, properties) {
   const result = await notionRequest(`pages/${pageId}`, 'PATCH', { properties });
   return { success: result.object !== 'error', error: result.message };
@@ -150,42 +157,87 @@ async function getMediaInfo(mediaId) {
   }
 }
 
-/* 인스타그램 인사이트 수집 (v22.0+ 호환)
+/**
+ * 인스타그램 인사이트 수집 (v22.0+ 호환)
  *
- * 변경 이력:
- *   - v22.0부터 plays, impressions, clips_replays_count, ig_reels_aggregated_all_plays_count 지원 종료
- *   - 모든 미디어 타입(FEED, REELS, STORY)에 views 지표 통합 적용
+ * 지원 지표 (v22.0+):
+ *   - views:              FEED, REELS, STORY (plays/impressions 대체)
+ *   - reach:              FEED, REELS, STORY
+ *   - saved:              FEED, REELS
+ *   - shares:             FEED, REELS, STORY
+ *   - follows:            FEED, STORY
+ *   - profile_visits:     FEED, STORY
+ *   - ig_reels_avg_watch_time:        REELS (평균 시청 시간, 밀리초)
+ *   - ig_reels_video_view_total_time: REELS (총 시청 시간, 밀리초)
+ *   - total_interactions: FEED, REELS, STORY (좋아요+저장+댓글+공유 합산)
+ *
+ * 캐러셀(CAROUSEL_ALBUM): 하위 미디어 단위 인사이트 미지원 → reach, saved, shares만 수집
  */
 async function getMediaInsights(mediaId, mediaType) {
+  const isReel    = (mediaType === 'VIDEO' || mediaType === 'REEL');
   const isCarousel = (mediaType === 'CAROUSEL_ALBUM');
 
-  // v22.0+ 기준 지원 지표:
-  //   - views: FEED, REELS, STORY 모두 지원 (plays/impressions 대체)
-  //   - saved: FEED, REELS 지원
-  //   - reach: FEED, REELS, STORY 지원
-  //   - shares: FEED, REELS, STORY 지원
-  // 캐러셀(CAROUSEL_ALBUM)은 하위 미디어 단위 인사이트 미지원 → saved, reach만 수집
-  let metrics = 'reach,saved,shares';
-  if (!isCarousel) metrics += ',views';
+  // 공통 지표
+  let metrics = 'reach,saved,shares,total_interactions';
+
+  if (!isCarousel) {
+    metrics += ',views';
+  }
+  if (!isCarousel) {
+    metrics += ',follows,profile_visits';
+  }
+  if (isReel) {
+    metrics += ',ig_reels_avg_watch_time,ig_reels_video_view_total_time';
+  }
 
   try {
     const res = await fetch(
       `${CONFIG.IG_BASE_URL}${mediaId}/insights?metric=${metrics}&access_token=${CONFIG.INSTAGRAM_TOKEN}`
     );
     const data = await res.json();
-    if (data.error) return { saved: 0, reach: 0, views: 0, shares: 0, insightError: data.error.message };
+    if (data.error) {
+      return {
+        saved: 0, reach: 0, views: 0, shares: 0,
+        follows: 0, profileVisits: 0,
+        avgWatchTimeSec: 0, totalWatchTimeMin: 0, totalInteractions: 0,
+        insightError: data.error.message,
+      };
+    }
 
     let saved = 0, reach = 0, views = 0, shares = 0;
+    let follows = 0, profileVisits = 0;
+    let avgWatchTimeMs = 0, totalWatchTimeMs = 0, totalInteractions = 0;
+
     for (const metric of (data.data || [])) {
       const val = metric.values?.[0]?.value ?? metric.value ?? 0;
-      if (metric.name === 'saved')  saved  = val;
-      if (metric.name === 'reach')  reach  = val;
-      if (metric.name === 'views')  views  = val;
-      if (metric.name === 'shares') shares = val;
+      switch (metric.name) {
+        case 'saved':                          saved            = val; break;
+        case 'reach':                          reach            = val; break;
+        case 'views':                          views            = val; break;
+        case 'shares':                         shares           = val; break;
+        case 'follows':                        follows          = val; break;
+        case 'profile_visits':                 profileVisits    = val; break;
+        case 'ig_reels_avg_watch_time':        avgWatchTimeMs   = val; break;
+        case 'ig_reels_video_view_total_time': totalWatchTimeMs = val; break;
+        case 'total_interactions':             totalInteractions = val; break;
+      }
     }
-    return { saved, reach, views, shares, insightError: null };
+
+    return {
+      saved, reach, views, shares,
+      follows, profileVisits,
+      avgWatchTimeSec:   Math.round(avgWatchTimeMs / 1000),
+      totalWatchTimeMin: Math.round(totalWatchTimeMs / 60000),
+      totalInteractions,
+      insightError: null,
+    };
   } catch (e) {
-    return { saved: 0, reach: 0, views: 0, shares: 0, insightError: e.message };
+    return {
+      saved: 0, reach: 0, views: 0, shares: 0,
+      follows: 0, profileVisits: 0,
+      avgWatchTimeSec: 0, totalWatchTimeMin: 0, totalInteractions: 0,
+      insightError: e.message,
+    };
   }
 }
 
@@ -217,7 +269,28 @@ async function getRecentMedia(limit = 50) {
 }
 
 /**
- * [Phase 1 - 개선됨] 인스타그램 API에서 게시물을 자동 수집하여 신규 항목 생성
+ * 인사이트 데이터를 Notion 속성 형식으로 변환
+ * (존재하는 속성만 포함하여 validation_error 방지)
+ */
+function buildInsightProperties(insights, likeCount = 0, commentCount = 0) {
+  return {
+    '조회수':          { number: insights.views          || 0 },
+    '좋아요':          { number: likeCount               || 0 },
+    '댓글':            { number: commentCount            || 0 },
+    '저장':            { number: insights.saved          || 0 },
+    '도달':            { number: insights.reach          || 0 },
+    '공유':            { number: insights.shares         || 0 },
+    '팔로우':          { number: insights.follows        || 0 },
+    '프로필 방문':     { number: insights.profileVisits  || 0 },
+    '총 반응 수':      { number: insights.totalInteractions || 0 },
+    '평균 시청 시간(초)':  { number: insights.avgWatchTimeSec  || 0 },
+    '총 시청 시간(분)':    { number: insights.totalWatchTimeMin || 0 },
+    '마지막 수집일':   { date: { start: new Date().toISOString() } },
+  };
+}
+
+/**
+ * [Phase 1] 인스타그램 API에서 게시물을 자동 수집하여 신규 항목 생성
  *
  * 기존: 노션에 URL을 수동 입력 → 인스타그램과 매칭
  * 개선: 인스타그램 API에서 최신 게시물을 직접 가져와 → 노션 DB에 없으면 자동 생성
@@ -225,7 +298,6 @@ async function getRecentMedia(limit = 50) {
 async function processNewPosts() {
   console.log('[Step 1] 인스타그램에서 최신 게시물 자동 수집 중...');
 
-  // 인스타그램 최신 게시물 가져오기
   const mediaList = await getRecentMedia(50);
   if (mediaList.length === 0) {
     console.log('[Step 1] 인스타그램 게시물을 가져오지 못했습니다.');
@@ -239,7 +311,9 @@ async function processNewPosts() {
     rich_text: { is_not_empty: true },
   });
   const existingIds = new Set(
-    existingPages.map(p => p.properties?.['Instagram ID']?.rich_text?.[0]?.text?.content).filter(Boolean)
+    existingPages
+      .map(p => p.properties?.['Instagram ID']?.rich_text?.[0]?.text?.content)
+      .filter(Boolean)
   );
   console.log(`[Step 1] 노션 DB에 기존 등록된 게시물: ${existingIds.size}개`);
 
@@ -248,7 +322,6 @@ async function processNewPosts() {
   let newCount = 0;
 
   for (const media of mediaList) {
-    // 이미 등록된 게시물은 건너뜀
     if (existingIds.has(media.id)) continue;
 
     // 8주가 지난 게시물은 신규 등록하지 않음
@@ -258,17 +331,14 @@ async function processNewPosts() {
       continue;
     }
 
-    // 인사이트 수집
     const insights = await getMediaInsights(media.id, media.media_type);
     if (insights.insightError) {
       console.log(`[Step 1] 인사이트 수집 실패 (${media.id}): ${insights.insightError}`);
     }
 
-    // 채널 분류
     const isVideo = media.media_type === 'VIDEO' || media.media_type === 'REEL';
     const channel = isVideo ? '릴스' : '피드/캐러셀';
 
-    // 노션 DB에 새 항목 생성
     const properties = {
       '이름': {
         title: [{ type: 'text', text: { content: (media.caption || '(캡션 없음)').slice(0, 50) } }]
@@ -277,17 +347,10 @@ async function processNewPosts() {
         rich_text: [{ type: 'text', text: { content: media.id } }]
       },
       '원본 URL': { url: media.permalink },
-      '날짜': { date: { start: media.timestamp } },
-      '채널': { select: { name: channel } },
-      '상태': { status: { name: '업로드 완료' } },
+      '날짜':     { date: { start: media.timestamp } },
+      '채널':     { select: { name: channel } },
       '트래킹 상태': { select: { name: '트래킹중' } },
-      '조회수': { number: insights.views },
-      '좋아요': { number: media.like_count || 0 },
-      '댓글': { number: media.comments_count || 0 },
-      '저장': { number: insights.saved },
-      '도달': { number: insights.reach },
-      '공유': { number: insights.shares || 0 },
-      '마지막 수집일': { date: { start: new Date().toISOString() } },
+      ...buildInsightProperties(insights, media.like_count, media.comments_count),
     };
 
     const result = await createPage(properties);
@@ -299,7 +362,6 @@ async function processNewPosts() {
       console.log(`[Step 1] 신규 등록 실패: ${media.id}`);
     }
 
-    // API 요청 제한 방지
     await new Promise(r => setTimeout(r, 300));
   }
 
@@ -327,7 +389,7 @@ async function updateExistingTracking() {
   for (const page of pages) {
     const dateStr = page.properties?.['날짜']?.date?.start;
 
-    // 8주 경과 여부 확인
+    // 8주 경과 → 트래킹 종료
     if (dateStr && (now - new Date(dateStr).getTime()) > eightWeeksMs) {
       await updatePage(page.id, {
         '트래킹 상태': { select: { name: '트래킹 종료' } },
@@ -337,7 +399,6 @@ async function updateExistingTracking() {
       continue;
     }
 
-    // Instagram ID로 최신 지표 수집
     const instagramId = page.properties?.['Instagram ID']?.rich_text?.[0]?.text?.content;
     if (!instagramId) continue;
 
@@ -348,16 +409,15 @@ async function updateExistingTracking() {
     }
 
     const insights = await getMediaInsights(instagramId, mediaInfo.media_type);
+    if (insights.insightError) {
+      console.log(`[Step 2] 인사이트 수집 실패 (${instagramId}): ${insights.insightError}`);
+    }
 
-    await updatePage(page.id, {
-      '조회수': { number: insights.views },
-      '좋아요': { number: mediaInfo.like_count || 0 },
-      '댓글': { number: mediaInfo.comments_count || 0 },
-      '저장': { number: insights.saved },
-      '도달': { number: insights.reach },
-      '공유': { number: insights.shares || 0 },
-      '마지막 수집일': { date: { start: new Date().toISOString() } },
-    });
+    await updatePage(page.id, buildInsightProperties(
+      insights,
+      mediaInfo.like_count,
+      mediaInfo.comments_count
+    ));
     console.log(`[Step 2] 업데이트 완료: ${instagramId}`);
     updatedCount++;
 
@@ -377,7 +437,7 @@ async function main() {
   }
 
   try {
-    const newRes = await processNewPosts();
+    const newRes   = await processNewPosts();
     const trackRes = await updateExistingTracking();
     console.log(`=== 완료 | 신규 등록: ${newRes.newPosts} | 업데이트: ${trackRes.tracked} | 트래킹 종료: ${trackRes.expired} ===`);
   } catch (err) {
