@@ -150,32 +150,42 @@ async function getMediaInfo(mediaId) {
   }
 }
 
-/* 인스타그램 인사이트 수집 (유형별 분기) */
+/* 인스타그램 인사이트 수집 (v22.0+ 호환)
+ *
+ * 변경 이력:
+ *   - v22.0부터 plays, impressions, clips_replays_count, ig_reels_aggregated_all_plays_count 지원 종료
+ *   - 모든 미디어 타입(FEED, REELS, STORY)에 views 지표 통합 적용
+ */
 async function getMediaInsights(mediaId, mediaType) {
-  const isVideo = (mediaType === 'VIDEO' || mediaType === 'REEL');
   const isCarousel = (mediaType === 'CAROUSEL_ALBUM');
 
-  let metrics = 'saved,reach';
-  if (isVideo) metrics += ',plays';
-  else if (!isCarousel) metrics += ',impressions';
+  // v22.0+ 기준 지원 지표:
+  //   - views: FEED, REELS, STORY 모두 지원 (plays/impressions 대체)
+  //   - saved: FEED, REELS 지원
+  //   - reach: FEED, REELS, STORY 지원
+  //   - shares: FEED, REELS, STORY 지원
+  // 캐러셀(CAROUSEL_ALBUM)은 하위 미디어 단위 인사이트 미지원 → saved, reach만 수집
+  let metrics = 'reach,saved,shares';
+  if (!isCarousel) metrics += ',views';
 
   try {
     const res = await fetch(
       `${CONFIG.IG_BASE_URL}${mediaId}/insights?metric=${metrics}&access_token=${CONFIG.INSTAGRAM_TOKEN}`
     );
     const data = await res.json();
-    if (data.error) return { saved: 0, reach: 0, views: 0, insightError: data.error.message };
+    if (data.error) return { saved: 0, reach: 0, views: 0, shares: 0, insightError: data.error.message };
 
-    let saved = 0, reach = 0, views = 0;
+    let saved = 0, reach = 0, views = 0, shares = 0;
     for (const metric of (data.data || [])) {
-      if (metric.name === 'saved') saved = metric.values?.[0]?.value || metric.value || 0;
-      if (metric.name === 'reach') reach = metric.values?.[0]?.value || metric.value || 0;
-      if (metric.name === 'plays' || metric.name === 'impressions')
-        views = metric.values?.[0]?.value || metric.value || 0;
+      const val = metric.values?.[0]?.value ?? metric.value ?? 0;
+      if (metric.name === 'saved')  saved  = val;
+      if (metric.name === 'reach')  reach  = val;
+      if (metric.name === 'views')  views  = val;
+      if (metric.name === 'shares') shares = val;
     }
-    return { saved, reach, views, insightError: null };
+    return { saved, reach, views, shares, insightError: null };
   } catch (e) {
-    return { saved: 0, reach: 0, views: 0, insightError: e.message };
+    return { saved: 0, reach: 0, views: 0, shares: 0, insightError: e.message };
   }
 }
 
@@ -276,6 +286,7 @@ async function processNewPosts() {
       '댓글': { number: media.comments_count || 0 },
       '저장': { number: insights.saved },
       '도달': { number: insights.reach },
+      '공유': { number: insights.shares || 0 },
       '마지막 수집일': { date: { start: new Date().toISOString() } },
     };
 
@@ -344,6 +355,7 @@ async function updateExistingTracking() {
       '댓글': { number: mediaInfo.comments_count || 0 },
       '저장': { number: insights.saved },
       '도달': { number: insights.reach },
+      '공유': { number: insights.shares || 0 },
       '마지막 수집일': { date: { start: new Date().toISOString() } },
     });
     console.log(`[Step 2] 업데이트 완료: ${instagramId}`);
