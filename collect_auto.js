@@ -95,6 +95,8 @@ async function notionRequest(endpoint, method = 'GET', body = null) {
   const data = await res.json();
   if (!res.ok || data.object === 'error') {
     console.error(`[Notion Error] ${method} ${endpoint} → ${res.status}:`, JSON.stringify(data));
+    // 오류 객체에 HTTP 상태 코드를 함께 반환하여 호출부에서 처리 가능하도록 함
+    data._httpStatus = res.status;
   }
   return data;
 }
@@ -119,7 +121,14 @@ async function queryDatabase(filter) {
 /* 노션 페이지 업데이트 (존재하는 속성만 안전하게 업데이트) */
 async function updatePage(pageId, properties) {
   const result = await notionRequest(`pages/${pageId}`, 'PATCH', { properties });
-  return { success: result.object !== 'error', error: result.message };
+  const success = result.object !== 'error';
+  return {
+    success,
+    error: result.message,
+    httpStatus: result._httpStatus,
+    // 404: 페이지 없음 / 400: 속성 불일치 (다른 DB 페이지)
+    isInvalidPage: result._httpStatus === 404 || result._httpStatus === 400,
+  };
 }
 
 /* 노션 페이지 생성 */
@@ -413,11 +422,18 @@ async function updateExistingTracking() {
       console.log(`[Step 2] 인사이트 수집 실패 (${instagramId}): ${insights.insightError}`);
     }
 
-    await updatePage(page.id, buildInsightProperties(
+    const updateResult = await updatePage(page.id, buildInsightProperties(
       insights,
       mediaInfo.like_count,
       mediaInfo.comments_count
     ));
+
+    if (updateResult.isInvalidPage) {
+      // 404 또는 400 오류: 이 페이지는 현재 DB 외부에 있거나 삭제된 페이지이므로 건너뜀
+      console.log(`[Step 2] 유효하지 않은 페이지 건너뜀 (HTTP ${updateResult.httpStatus}): ${page.id}`);
+      continue;
+    }
+
     console.log(`[Step 2] 업데이트 완료: ${instagramId}`);
     updatedCount++;
 
