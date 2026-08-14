@@ -20,3 +20,10 @@ jobs:
           NOTION_DB_ID: ${{ secrets.NOTION_DB_ID }}
           IG_ACCOUNT_ID: ${{ secrets.IG_ACCOUNT_ID }}
           INSTAGRAM_ACCOUNT_ID: ${{ secrets.INSTAGRAM_ACCOUNT_ID }}
+      - name: Account & story insights (v1)
+        if: always()
+        run: node ig-account-sync-v1.js
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          INSTAGRAM_TOKEN: ${{ secrets.INSTAGRAM_TOKEN }}
+          INSTAGRAM_ACCOUNT_ID: ${{ secrets.INSTAGRAM_ACCOUNT_ID }}
