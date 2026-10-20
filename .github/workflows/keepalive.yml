@@ -1,0 +1,23 @@
+name: Keepalive
+
+# GitHub은 60일간 커밋이 없는 저장소의 예약 워크플로를 자동으로 끕니다.
+# 매달 1일 빈 커밋을 남겨 Instagram Tracking이 멈추지 않게 합니다.
+on:
+  schedule:
+    - cron: '17 0 1 * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Empty commit
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit --allow-empty -m "chore: keepalive $(date -u +%Y-%m-%d)"
+          git push
