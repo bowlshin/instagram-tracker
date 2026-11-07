@@ -2,8 +2,8 @@ name: Discover Reference Reels
 
 on:
   schedule:
-    # 월·목 20:00 UTC = 화·금 05:00 KST (벤치마크 예약 작업 05:52 KST 직전)
-    - cron: '0 20 * * 1,4'
+    # 매일 20:00 UTC = 05:00 KST (06:00 선별 작업 → 09:20~ PC worker 순서)
+    - cron: '0 20 * * *'
   workflow_dispatch:
     inputs:
       dry_run:
