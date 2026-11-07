@@ -1,0 +1,26 @@
+name: Discover Reference Reels
+
+on:
+  schedule:
+    # 월·목 20:00 UTC = 화·금 05:00 KST (벤치마크 예약 작업 05:52 KST 직전)
+    - cron: '0 20 * * 1,4'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: '1이면 노션에 쓰지 않고 로그만'
+        default: '0'
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - run: node discover_reels.js
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          INSTAGRAM_TOKEN: ${{ secrets.INSTAGRAM_TOKEN }}
+          INSTAGRAM_ACCOUNT_ID: ${{ secrets.INSTAGRAM_ACCOUNT_ID }}
+          DRY_RUN: ${{ github.event.inputs.dry_run || '0' }}
