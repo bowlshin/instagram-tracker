@@ -9,6 +9,9 @@ on:
       dry_run:
         description: '1이면 노션에 쓰지 않고 로그만'
         default: '0'
+      hashtag_test:
+        description: '해시태그를 넣으면 발굴 대신 top_media 테스트만 함'
+        default: ''
 
 jobs:
   discover:
@@ -18,7 +21,16 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
-      - run: node discover_reels.js
+      - name: Hashtag test
+        if: ${{ github.event.inputs.hashtag_test != '' }}
+        run: node discover_reels.js --hashtag "${{ github.event.inputs.hashtag_test }}"
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          INSTAGRAM_TOKEN: ${{ secrets.INSTAGRAM_TOKEN }}
+          INSTAGRAM_ACCOUNT_ID: ${{ secrets.INSTAGRAM_ACCOUNT_ID }}
+      - name: Discover
+        if: ${{ github.event.inputs.hashtag_test == '' }}
+        run: node discover_reels.js
         env:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           INSTAGRAM_TOKEN: ${{ secrets.INSTAGRAM_TOKEN }}
