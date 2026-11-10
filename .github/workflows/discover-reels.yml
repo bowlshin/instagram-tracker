@@ -2,8 +2,8 @@ name: Discover Reference Reels
 
 on:
   schedule:
-    # 매일 20:00 UTC = 05:00 KST (06:00 선별 작업 → 09:20~ PC worker 순서)
-    - cron: '0 20 * * *'
+    # 매일 18:23 UTC = 03:23 KST. 정각 예약은 GitHub 지연이 3~6시간이라 분을 옮김 (06:06 선별 작업보다 먼저 끝나야 함)
+    - cron: '23 18 * * *'
   workflow_dispatch:
     inputs:
       dry_run:
