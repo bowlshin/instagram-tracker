@@ -1,0 +1,37 @@
+name: Hit Watch (24h 판정)
+
+# 수집(Instagram Tracking)이 끝날 때마다 이어서 돈다. 인스타그램 API는 부르지 않고 노션만 읽고 쓴다.
+#   우리 릴스를 게시 하루 안팎에 '히트 / 평소'로 판정 → 노션 '히트 판정' DB에 1행
+#   히트면 디스코드로 알림 (저장소 Secrets 에 DISCORD_WEBHOOK_URL 이 있을 때만)
+on:
+  workflow_run:
+    workflows: ["Instagram Tracking"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: '1이면 노션·디스코드에 쓰지 않고 로그만'
+        default: '0'
+
+concurrency:
+  group: hit-watch
+  cancel-in-progress: false
+
+jobs:
+  judge:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Rule tests
+        run: node --test test/hit_watch.test.js test/hit_watch.run.test.js
+      - name: Judge
+        run: node hit_watch.js
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          NOTION_DB_ID: ${{ secrets.NOTION_DB_ID }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          DRY_RUN: ${{ github.event.inputs.dry_run || '0' }}
