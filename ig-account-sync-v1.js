@@ -7,8 +7,12 @@
  * 수집 항목:
  *   [매일]   스토리 인사이트 → Notion `스토리 인사이트` DB
  *            (스토리는 24시간 후 데이터 소멸 → 하루 1회 이상 실행 필수)
- *   [매일]   계정 일일 지표 (도달, 조회수, 프로필 방문, 팔로우 증감, 참여 계정, 팔로워 수)
+ *   [매일]   계정 일일 지표 (도달, 조회수, 프로필 방문, 참여 계정, 팔로워 수)
  *            → Notion `계정 일일 지표` DB (하루 1행, 재실행 시 갱신)
+ *   [매일]   팔로우 획득·이탈 (지난 날짜별 확정값) → 같은 DB의 그 날짜 행
+ *            `팔로우 획득` · `팔로우 이탈` · `팔로우 증감`(= 획득 − 이탈)
+ *            어제부터 3일은 실행마다 다시 받아 덮어쓰고(집계가 최대 48시간 늦을 수 있음),
+ *            그보다 오래된 행 중 비어 있는 것은 실행마다 12개씩 채운다(최근 45일).
  *   [주 1회] 팔로워 demographic (도시/연령/성별) → 같은 DB에 '주간 스냅샷' 행
  *            (월요일 자동 실행, 또는 FORCE_DEMOGRAPHICS=1 로 강제 실행)
  *
@@ -26,6 +30,11 @@ const CONFIG = {
   ACCOUNT_DB_ID: process.env.NOTION_ACCOUNT_DB_ID || '6a2d4561098d4fc6aab823977b72d7fb',
   IG_BASE_URL: 'https://graph.facebook.com/v25.0/',
   FORCE_DEMOGRAPHICS: process.env.FORCE_DEMOGRAPHICS === '1',
+  // 팔로우 획득·이탈
+  FOLLOW_FINALIZE_DAYS: 3,          // 어제부터 며칠 전까지 실행마다 다시 받아 확정할지
+  FOLLOW_BACKFILL_WINDOW_DAYS: 45,  // 빈 칸을 찾아 채울 기간
+  FOLLOW_BACKFILL_PER_RUN: 12,      // 한 번 실행에 채울 지난 날짜 수
+  CALL_DELAY_MS: 300,
 };
 
 let resolvedIgAccountId = null;
@@ -270,7 +279,7 @@ async function processStories() {
 async function getAccountDailyMetrics(igId) {
   const result = {
     reach: 0, views: 0, profileViews: 0,
-    followsNet: 0, accountsEngaged: 0, followersCount: 0,
+    accountsEngaged: 0, followersCount: 0,
     insightErrors: [],
   };
 
@@ -292,11 +301,8 @@ async function getAccountDailyMetrics(igId) {
   if (profile.error) result.insightErrors.push(`profile: ${profile.error}`);
   result.profileViews = profile.values.profile_views ?? 0;
 
-  const follows = await fetchInsightGroup(
-    igId, ['follows_and_unfollows'], '&period=day&metric_type=total_value'
-  );
-  if (follows.error) result.insightErrors.push(`follows: ${follows.error}`);
-  result.followsNet = follows.values.follows_and_unfollows ?? 0;
+  // follows_and_unfollows 는 여기서 받지 않는다. breakdown=follow_type 없이 받으면 값이 비어
+  // '팔로우 증감'에 0만 쌓였다(2026-08~11). 날짜별 획득·이탈은 processFollowBreakdown 이 채운다.
 
   const views = await fetchInsightGroup(
     igId, ['views'], '&period=day&metric_type=total_value'
@@ -341,7 +347,6 @@ async function processAccountDaily() {
     '도달': { number: metrics.reach },
     '조회수': { number: metrics.views },
     '프로필 방문': { number: metrics.profileViews },
-    '팔로우 증감': { number: metrics.followsNet },
     '참여 계정 수': { number: metrics.accountsEngaged },
     '팔로워 수': { number: metrics.followersCount },
     '마지막 수집일': { date: { start: new Date().toISOString() } },
@@ -371,6 +376,130 @@ async function processAccountDaily() {
     console.log(`[Step 2] 오늘(${today}) 행 신규 등록 완료`);
   }
   return { ok: true };
+}
+
+/* ══════════════════════════ [Phase 2b] 팔로우 획득·이탈 (날짜별) ══════════════════════════ */
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const addDaysYmd = (ymd, n) =>
+  new Date(Date.parse(`${ymd}T00:00:00Z`) + n * 86400000).toISOString().slice(0, 10);
+
+/* KST 날짜(YYYY-MM-DD) 하루의 since/until (Unix 초) */
+function kstDayRange(ymd) {
+  const since = Math.floor(Date.parse(`${ymd}T00:00:00+09:00`) / 1000);
+  return { since, until: since + 86400 };
+}
+
+/* follows_and_unfollows 응답에서 획득·이탈을 꺼낸다.
+ *   data[0].total_value.breakdowns[0].results[] = { dimension_values: [종류], value }
+ *   FOLLOWER     = 그 기간에 팔로우한 계정 수
+ *   NON_FOLLOWER = 그 기간에 언팔로우했거나 인스타그램을 떠난 계정 수
+ *   UNKNOWN      = 분류 안 됨 (증감 계산에는 넣지 않음)
+ * 두 값이 모두 없으면 null (집계 전이거나 제공 기간 밖 — 0으로 적지 않는다). */
+function parseFollowBreakdown(data) {
+  const metric = (data?.data || []).find((m) => m.name === 'follows_and_unfollows');
+  const results = metric?.total_value?.breakdowns?.[0]?.results;
+  if (!Array.isArray(results)) return null;
+  const byType = {};
+  for (const r of results) {
+    const key = (r.dimension_values || [])[0];
+    if (key) byType[key] = (byType[key] || 0) + (Number(r.value) || 0);
+  }
+  if (!('FOLLOWER' in byType) && !('NON_FOLLOWER' in byType)) return null;
+  const gained = byType.FOLLOWER || 0;
+  const lost = byType.NON_FOLLOWER || 0;
+  return { gained, lost, net: gained - lost, unknown: byType.UNKNOWN || 0 };
+}
+
+async function getFollowsForDay(igId, ymd) {
+  const { since, until } = kstDayRange(ymd);
+  try {
+    const res = await fetch(
+      `${CONFIG.IG_BASE_URL}${igId}/insights?metric=follows_and_unfollows&period=day&metric_type=total_value` +
+      `&breakdown=follow_type&since=${since}&until=${until}&access_token=${CONFIG.INSTAGRAM_TOKEN}`
+    );
+    const data = await res.json();
+    if (data.error) return { error: data.error.message || 'API 오류' };
+    const value = parseFollowBreakdown(data);
+    return value ? { value } : { error: '값 없음 (집계 전이거나 제공 기간 밖)' };
+  } catch (e) {
+    return { error: `요청 실패 (${e.name})` };
+  }
+}
+
+/* 어느 날짜의 행을 채울지 고른다.
+ *   finalize : 어제부터 N일 — 값이 있어도 다시 받아 덮어쓴다 (집계가 늦게 확정될 수 있어서)
+ *   backfill : 그보다 오래된 행 중 '팔로우 획득'이 빈 것 — 최신순으로 K개
+ * rows: [{ pageId, date: 'YYYY-MM-DD', hasFollows }] (그 날짜 행이 없으면 건너뜀) */
+function pickFollowTargets(rows, todayKst, cfg = CONFIG) {
+  const byDate = new Map(rows.map((r) => [r.date, r]));
+  const finalize = [];
+  for (let i = 1; i <= cfg.FOLLOW_FINALIZE_DAYS; i++) {
+    const row = byDate.get(addDaysYmd(todayKst, -i));
+    if (row) finalize.push(row);
+  }
+  const done = new Set(finalize.map((r) => r.date));
+  const oldest = addDaysYmd(todayKst, -cfg.FOLLOW_BACKFILL_WINDOW_DAYS);
+  const backfill = [...byDate.values()]
+    .filter((r) => !r.hasFollows && r.date < todayKst && r.date >= oldest && !done.has(r.date))
+    .sort((a, b) => (a.date < b.date ? 1 : -1))
+    .slice(0, cfg.FOLLOW_BACKFILL_PER_RUN);
+  return { finalize, backfill };
+}
+
+async function processFollowBreakdown({ today = todayKST() } = {}) {
+  console.log('[Step 2b] 팔로우 획득·이탈(날짜별) 수집 중...');
+  const igId = await findIgAccountId();
+  if (!igId) return { targets: 0, updated: 0, failed: 0 };
+
+  const pages = await queryDatabase(CONFIG.ACCOUNT_DB_ID, {
+    and: [
+      { property: '유형', select: { equals: '일일' } },
+      { property: '날짜', date: { on_or_after: addDaysYmd(today, -CONFIG.FOLLOW_BACKFILL_WINDOW_DAYS) } },
+    ],
+  });
+  const rows = pages
+    .map((p) => ({
+      pageId: p.id,
+      date: (p.properties?.['날짜']?.date?.start || '').slice(0, 10),
+      hasFollows: p.properties?.['팔로우 획득']?.number != null,
+    }))
+    .filter((r) => r.date);
+
+  const { finalize, backfill } = pickFollowTargets(rows, today);
+  const targets = [...finalize, ...backfill];
+  let updated = 0;
+  let failed = 0;
+
+  for (const row of targets) {
+    const got = await getFollowsForDay(igId, row.date);
+    if (got.error) {
+      failed++;
+      console.log(`[Step 2b] ${row.date} 건너뜀: ${got.error}`);
+      await sleep(CONFIG.CALL_DELAY_MS);
+      continue;
+    }
+    const upd = await updatePage(row.pageId, {
+      '팔로우 획득': { number: got.value.gained },
+      '팔로우 이탈': { number: got.value.lost },
+      '팔로우 증감': { number: got.value.net },
+    });
+    if (upd.success) {
+      updated++;
+      // 공개 저장소라 로그에 숫자는 찍지 않는다
+      console.log(`[Step 2b] ${row.date} 기록 완료${got.value.unknown ? ' (분류 안 된 값 있음)' : ''}`);
+    } else {
+      failed++;
+      console.error(`[Step 2b] ${row.date} 노션 기록 실패: ${upd.error || ''}`);
+      if (upd.isSchemaError) {
+        console.error("[Step 2b] '계정 일일 지표' DB에 숫자 속성 '팔로우 획득'·'팔로우 이탈'·'팔로우 증감'이 있는지 확인하세요. 이번 실행은 여기서 멈춥니다.");
+        break;
+      }
+    }
+    await sleep(CONFIG.CALL_DELAY_MS);
+  }
+  console.log(`[Step 2b] 대상 ${targets.length}일 (확정 ${finalize.length} · 지난 빈 칸 ${backfill.length}) → 기록 ${updated} · 실패 ${failed}`);
+  return { targets: targets.length, updated, failed };
 }
 
 /* ══════════════════════════ [Phase 3] 팔로워 demographic (주 1회) ══════════════════════════ */
@@ -475,10 +604,18 @@ async function main() {
   try {
     const storyRes = await processStories();
     const dailyRes = await processAccountDaily();
+    // 팔로우 획득·이탈은 실패해도 나머지 수집을 막지 않는다
+    let followRes = { updated: 0, failed: 0 };
+    try {
+      followRes = await processFollowBreakdown();
+    } catch (e) {
+      console.error('[Step 2b] 실패 (다른 수집에는 영향 없음):', e.message);
+    }
     const demoRes = await processDemographics();
     console.log(
       `=== 완료 | 스토리 신규: ${storyRes.newStories} / 갱신: ${storyRes.updated}` +
       ` | 일일 지표: ${dailyRes.ok ? 'OK' : '실패'}` +
+      ` | 팔로우 획득·이탈: ${followRes.updated}일 기록` +
       ` | demographic: ${demoRes.skipped ? '건너뜀' : (demoRes.ok ? 'OK' : '실패')} ===`
     );
   } catch (err) {
@@ -487,4 +624,8 @@ async function main() {
   }
 }
 
-main();
+module.exports = {
+  CONFIG, parseFollowBreakdown, kstDayRange, addDaysYmd, pickFollowTargets, processFollowBreakdown,
+};
+
+if (require.main === module) main();
